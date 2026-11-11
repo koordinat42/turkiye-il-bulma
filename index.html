@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Türkiye İl Bulma Oyunu</title>
+    <!-- Tailwind CSS (Arayüz tasarımı için) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- D3.js (Harita çizimi ve SVG manipülasyonu için) -->
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            overflow: hidden; /* Dış kaydırmayı engelle */
+        }
+
+        /* Harita Konteyneri - Deniz/Izgara görünümü */
+        #map-container {
+            background-color: #e2e8f0;
+            background-image: radial-gradient(#94a3b8 1px, transparent 1px);
+            background-size: 24px 24px;
+            touch-action: none; /* D3 zoom/pan için tarayıcının kendi kaydırmasını kapatır */
+        }
+
+        /* İl Poligonları Stili */
+        .province {
+            stroke: #ffffff;
+            stroke-width: 0.8px;
+            stroke-linejoin: round;
+            cursor: pointer;
+            transition: fill-opacity 0.2s, stroke-width 0.2s, stroke 0.2s;
+        }
+
+        /* Hover (Oyun aktif değilken üzerine gelindiğinde) */
+        .province:hover {
+            stroke: #334155;
+            stroke-width: 1.5px;
+        }
+
+        /* Doğru bulunan il */
+        .province.found {
+            fill: #22c55e !important; /* Tailwind green-500 */
+            stroke: #14532d;
+            stroke-width: 1px;
+            pointer-events: none; /* Bir daha tıklanamaz */
+            transition: fill 0.4s ease-out;
+        }
+
+        /* Yanlış tıklanan il (Kırmızı yanıp sönme efekti) */
+        .province.error-flash {
+            fill: #ef4444 !important; /* Tailwind red-500 */
+            transition: fill 0.1s;
+        }
+
+        /* Tik İşareti (Animasyonlu) */
+        .tick-bg, .tick-mark {
+            animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+            transform-origin: center;
+        }
+
+        @keyframes popIn {
+            0% { transform: scale(0); opacity: 0; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen w-full bg-slate-50 text-slate-800">
+
+    <!-- Üst Bilgi Barı ve Skor Tablosu -->
+    <header class="bg-white shadow-md z-10 relative flex justify-between items-center px-4 py-3 shrink-0">
+        <div class="flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-blue-600" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clip-rule="evenodd" />
+            </svg>
+            <h1 class="text-lg md:text-xl font-extrabold tracking-tight hidden sm:block">Türkiye İl Bulma</h1>
+        </div>
+
+        <!-- Oyun Kontrol Paneli (Başlangıçta Gizli) -->
+        <div id="game-dashboard" class="hidden flex-1 flex justify-between sm:justify-end sm:space-x-8 items-center pl-2">
+            <div class="text-center flex-1 sm:flex-none">
+                <span class="block text-[10px] md:text-xs text-slate-500 uppercase font-bold tracking-widest">Bulunacak İl</span>
+                <span id="target-name" class="text-lg md:text-2xl font-black text-blue-700 bg-blue-100/50 px-4 md:px-6 py-1 rounded-full shadow-inner block mx-auto max-w-max border border-blue-200">
+                    -
+                </span>
+            </div>
+            
+            <div class="flex space-x-4 text-right shrink-0">
+                <div class="flex flex-col">
+                    <span class="text-[10px] uppercase font-bold text-slate-400">Puan</span>
+                    <span id="score-text" class="text-lg font-bold text-green-600">0</span>
+                </div>
+                <div class="flex flex-col">
+                    <span class="text-[10px] uppercase font-bold text-slate-400">Hata</span>
+                    <span id="mistake-text" class="text-lg font-bold text-red-500">0</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Harita Alanı -->
+    <main id="map-container" class="flex-1 w-full relative overflow-hidden">
+        
+        <!-- Yakınlaştırmayı Sıfırlama Butonu -->
+        <button id="reset-zoom-btn" class="absolute top-4 right-4 bg-white/90 hover:bg-white text-slate-700 p-2.5 rounded-full shadow-lg z-10 transition-transform transform hover:scale-110 hidden" title="Haritayı Ortalama">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+            </svg>
+        </button>
+
+        <!-- Bilgi İpucu (İl İsmi Hover) -->
+        <div id="tooltip" class="absolute hidden bg-slate-900/90 text-white px-3 py-1.5 rounded-lg shadow-xl text-sm md:text-base font-medium pointer-events-none z-50 transform -translate-x-1/2 -translate-y-full mt-[-10px] transition-opacity duration-150">
+        </div>
+
+        <!-- Başlangıç Ekranı Katmanı -->
+        <div id="start-overlay" class="absolute inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-20 transition-opacity duration-300">
+            <div class="bg-white rounded-3xl shadow-2xl p-6 md:p-10 max-w-md w-full text-center mx-4 border border-slate-100">
+                <div class="w-20 h-20 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+                    </svg>
+                </div>
+                <h2 class="text-2xl md:text-3xl font-extrabold text-slate-800 mb-3">Türkiye Haritası Oyunu</h2>
+                <p class="text-slate-500 mb-6 text-sm md:text-base">Yukarıda sorulan ili haritada bulup tıklayın. Küçük illeri bulmak için haritayı kaydırabilir ve yakınlaştırabilirsiniz.</p>
+                
+                <div id="loading-text" class="text-blue-600 font-semibold mb-4 animate-pulse flex items-center justify-center gap-2">
+                    <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                    Harita Verisi Yükleniyor...
+                </div>
+                
+                <button id="start-btn" class="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold py-4 px-6 rounded-xl shadow-lg transition-transform transform hover:scale-105 hidden">
+                    Oyuna Başla
+                </button>
+            </div>
+        </div>
+
+        <!-- Oyun Bitiş Ekranı Katmanı -->
+        <div id="game-over-overlay" class="absolute inset-0 bg-slate-900/70 backdrop-blur flex items-center justify-center z-20 hidden">
+            <div class="bg-white rounded-3xl shadow-2xl p-8 max-w-sm w-full text-center mx-4">
+                <div class="w-24 h-24 bg-green-100 text-green-500 rounded-full flex items-center justify-center mx-auto mb-6 shadow-inner">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                </div>
+                <h2 class="text-3xl font-extrabold text-slate-800 mb-2">Tebrikler!</h2>
+                <p class="text-slate-500 mb-6">Türkiye'nin tüm illerini tamamladınız.</p>
+                
+                <div class="bg-slate-50 rounded-xl p-5 mb-6 border border-slate-100">
+                    <div class="flex justify-between items-center mb-3">
+                        <span class="text-slate-500 font-semibold">Toplam Puan</span>
+                        <span id="final-score" class="text-2xl font-black text-blue-600">0</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-slate-500 font-semibold">Toplam Hata</span>
+                        <span id="final-mistakes" class="text-xl font-bold text-red-500">0</span>
+                    </div>
+                </div>
+                
+                <button id="restart-btn" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3.5 px-6 rounded-xl shadow-lg transition-transform transform hover:scale-105">
+                    Tekrar Oyna
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <!-- Oyun Mantığı ve Harita Çizimi -->
+    <script>
+        // --- DEĞİŞKENLER VE AYARLAR ---
+        let provincesData = [];
+        let unfoundProvinces = [];
+        let currentTarget = null;
+        
+        let score = 0;
+        let mistakes = 0;
+        let gameActive = false;
+        let isProcessingClick = false; // Çift tıklamayı engellemek için
+
+        // Estetik pastel renk paleti (Tüm illere rastgele atanacak)
+        const colorPalette = [
+            "#fca5a5", "#fdba74", "#fcd34d", "#fef08a", "#d9f99d", 
+            "#bbf7d0", "#86efac", "#6ee7b7", "#5eead4", "#7dd3fc", 
+            "#93c5fd", "#a5b4fc", "#c4b5fd", "#d8b4fe", "#f0abfc", 
+            "#f9a8d4", "#fda4af", "#ffd6a5", "#caffbf", "#9bf6ff"
+        ];
+        
+        // Her ilin kendi kalıcı rengini tutmak için
+        const provinceColors = {};
+
+        // --- D3.js KURULUMU ---
+        const container = document.getElementById("map-container");
+        const svg = d3.select("#map-container").append("svg")
+            .attr("width", "100%")
+            .attr("height", "100%")
+            // Görüntüleme kutusunu sabitliyoruz, tarayıcı boyutu değişse de SVG otomatik sığar
+            .attr("viewBox", "0 0 1000 500") 
+            .attr("preserveAspectRatio", "xMidYMid meet");
+
+        const mapGroup = svg.append("g"); // İllerin bulunduğu grup
+        const marksGroup = svg.append("g"); // Tik işaretlerinin ve puanların bulunacağı grup
+
+        let projection, pathGenerator;
+
+        // Yakınlaştırma (Zoom/Pan) Tanımlaması
+        const zoomBehavior = d3.zoom()
+            .scaleExtent([1, 8]) // Maks 8 kat yakınlaş
+            .on("zoom", (event) => {
+                mapGroup.attr("transform", event.transform);
+                marksGroup.attr("transform", event.transform);
+            });
+        
+        svg.call(zoomBehavior);
+
+        const tooltip = d3.select("#tooltip");
+
+        // --- YARDIMCI FONKSİYONLAR ---
+        
+        // GeoJSON içindeki property'den İl adını güvenlice alma
+        function getProvinceName(feature) {
+            if (!feature || !feature.properties) return null;
+            const p = feature.properties;
+            return p.name || p.NAME_1 || p.prov_name || p.il || "Bilinmeyen İl";
+        }
+
+        // --- VERİ ÇEKME VE HARİTAYI OLUŞTURMA ---
+        async function initMap() {
+            try {
+                // Türkiye GeoJSON (Güvenilir ve çok kullanılan bir kaynak)
+                const url = "https://raw.githubusercontent.com/cihadturhan/tr-geojson/master/geo/tr-cities-utf8.json";
+                const response = await fetch(url);
+                
+                if (!response.ok) throw new Error("Ağ hatası");
+                const geojson = await response.json();
+                
+                // İsimsiz verileri filtrele ve data indekslerini ekle
+                provincesData = geojson.features.filter(f => getProvinceName(f) && getProvinceName(f) !== "Bilinmeyen İl");
+                provincesData.forEach((d, i) => {
+                    d.provIndex = i;
+                    // Her ile kalıcı pastel bir renk ata
+                    provinceColors[i] = colorPalette[i % colorPalette.length];
+                });
+
+                // Türkiye'yi 1000x500 svg kutusuna sığdıracak projeksiyonu hesapla
+                projection = d3.geoMercator().fitSize([1000, 500], geojson);
+                pathGenerator = d3.geoPath().projection(projection);
+
+                // Poligonları (İlleri) Çiz
+                mapGroup.selectAll(".province")
+                    .data(provincesData)
+                    .enter()
+                    .append("path")
+                    .attr("class", "province")
+                    .attr("d", pathGenerator)
+                    .style("fill", d => provinceColors[d.provIndex])
+                    .on("click", handleProvinceClick)
+                    .on("mouseover", handleMouseOver)
+                    .on("mousemove", handleMouseMove)
+                    .on("mouseout", handleMouseOut);
+
+                // Yükleme tamamlandı, Başla butonunu göster
+                document.getElementById("loading-text").classList.add("hidden");
+                const startBtn = document.getElementById("start-btn");
+                startBtn.classList.remove("hidden");
+                
+                // Butonlara event listener ekle
+                startBtn.addEventListener("click", startGame);
+                document.getElementById("restart-btn").addEventListener("click", startGame);
+                document.getElementById("reset-zoom-btn").addEventListener("click", resetZoom);
+
+            } catch (error) {
+                console.error("Harita yüklenemedi:", error);
+                document.getElementById("loading-text").innerHTML = "Harita yüklenirken hata oluştu! Lütfen sayfayı yenileyin.";
+                document.getElementById("loading-text").classList.replace("text-blue-600", "text-red-500");
+            }
+        }
+
+        // --- ETKİLEŞİM FONKSİYONLARI ---
+
+        function handleMouseOver(event, d) {
+            const pathEl = d3.select(this);
+            // Oyun başlamadıysa ve henüz bulunmadıysa biraz şeffaflaştır
+            if (!pathEl.classed("found")) {
+                pathEl.style("fill-opacity", 0.7);
+            }
+            
+            // Oyun başlamadıysa, illeri tanımak için tooltip göster
+            if (!gameActive) {
+                tooltip.classed("hidden", false)
+                       .text(getProvinceName(d));
+            }
+        }
+
+        function handleMouseMove(event) {
+            if (!gameActive) {
+                // Tooltip pozisyonunu farenin yanına sabitle
+                tooltip.style("left", (event.pageX) + "px")
+                       .style("top", (event.pageY - 10) + "px");
+            }
+        }
+
+        function handleMouseOut(event, d) {
+            d3.select(this).style("fill-opacity", 1);
+            tooltip.classed("hidden", true);
+        }
+
+        function handleProvinceClick(event, d) {
+            // Oyun aktif değilse, veya tıklama işlemi sürüyorsa, veya il zaten bulunduysa iptal et
+            if (!gameActive || !currentTarget || isProcessingClick || d3.select(this).classed("found")) {
+                return;
+            }
+
+            const clickedName = getProvinceName(d);
+            const targetName = getProvinceName(currentTarget);
+            const pathEl = d3.select(this);
+            
+            // İlin merkez noktasını (centroid) hesapla (Yazı ve Tik işareti için)
+            let centroid = pathGenerator.centroid(d);
+            if (isNaN(centroid[0]) || isNaN(centroid[1])) {
+                // Eğer centroid hesaplanamazsa, bounding box'ın merkezini al (Hata koruması)
+                const bounds = pathGenerator.bounds(d);
+                centroid = [(bounds[0][0] + bounds[1][0])/2, (bounds[0][1] + bounds[1][1])/2];
+            }
+
+            if (clickedName === targetName) {
+                // DOĞRU BİLİNDİ!
+                isProcessingClick = true;
+                
+                pathEl.classed("found", true); // Yeşile döndür
+                
+                drawTick(centroid[0], centroid[1]); // Tik işaretini çiz
+                showFloatingText(centroid[0], centroid[1], "+10", "#16a34a"); // Yükselen puan efekti
+
+                score += 10;
+                updateDashboard();
+
+                // Kısa bir bekleme sonrası yeni hedefi ver
+                setTimeout(() => {
+                    isProcessingClick = false;
+                    nextTarget();
+                }, 700);
+
+            } else {
+                // YANLIŞ BİLİNDİ!
+                pathEl.classed("error-flash", true);
+                
+                showFloatingText(centroid[0], centroid[1], "-5", "#dc2626"); // Düşen puan efekti
+
+                mistakes++;
+                score = Math.max(0, score - 5); // Puan eksiye düşmesin (opsiyonel)
+                updateDashboard();
+
+                // Kırmızı flaş efektini kısa süre sonra kaldır
+                setTimeout(() => {
+                    pathEl.classed("error-flash", false);
+                }, 400);
+            }
+        }
+
+        // --- GÖRSEL EFEKTLER ---
+
+        // Seçilen ilin merkezine tik işareti ekler
+        function drawTick(x, y) {
+            const tickGroup = marksGroup.append("g")
+                .attr("transform", `translate(${x}, ${y})`);
+                
+            // Alt plan yeşil daire (Kontrast için)
+            tickGroup.append("circle")
+                .attr("class", "tick-bg")
+                .attr("r", 9)
+                .attr("fill", "#22c55e")
+                .attr("stroke", "#ffffff")
+                .attr("stroke-width", 1.5)
+                .style("filter", "drop-shadow(0px 2px 2px rgba(0,0,0,0.3))");
+
+            // Beyaz Tik Çizgisi
+            tickGroup.append("path")
+                .attr("class", "tick-mark")
+                .attr("d", "M -3.5,0.5 L -1,3 L 4,-3")
+                .attr("stroke", "#ffffff")
+                .attr("stroke-width", 2.2)
+                .attr("stroke-linecap", "round")
+                .attr("stroke-linejoin", "round")
+                .attr("fill", "none");
+        }
+
+        // Tıklanan yerden yükselen skor yazısı efekti
+        function showFloatingText(x, y, text, color) {
+            const floatText = marksGroup.append("text")
+                .attr("x", x)
+                .attr("y", y - 12)
+                .attr("text-anchor", "middle")
+                .attr("font-weight", "900")
+                .attr("font-size", "14px")
+                .attr("fill", color)
+                .text(text)
+                .style("pointer-events", "none")
+                .style("text-shadow", "0px 1px 3px rgba(255,255,255,0.9)");
+                
+            floatText.transition()
+                .duration(800)
+                .ease(d3.easeCubicOut)
+                .attr("y", y - 35) // Yukarı doğru kay
+                .style("opacity", 0)
+                .remove(); // Animasyon bitince temizle
+        }
+
+        // --- OYUN MANTIĞI ---
+
+        function startGame() {
+            // Listeyi kopyala ve rastgele karıştır (Fisher-Yates)
+            unfoundProvinces = [...provincesData];
+            for (let i = unfoundProvinces.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [unfoundProvinces[i], unfoundProvinces[j]] = [unfoundProvinces[j], unfoundProvinces[i]];
+            }
+            
+            score = 0;
+            mistakes = 0;
+            gameActive = true;
+            isProcessingClick = false;
+            
+            // Harita sıfırlama
+            mapGroup.selectAll(".province")
+                .classed("found", false)
+                .classed("error-flash", false)
+                .style("fill", d => provinceColors[d.provIndex]); // Renkleri geri yükle
+            
+            marksGroup.selectAll("*").remove(); // Eski tikleri temizle
+            resetZoom(); // Zoom'u sıfırla
+            
+            // Arayüzleri ayarla
+            document.getElementById("start-overlay").classList.add("hidden");
+            document.getElementById("game-over-overlay").classList.add("hidden");
+            document.getElementById("game-dashboard").classList.remove("hidden");
+            document.getElementById("game-dashboard").classList.add("flex");
+            document.getElementById("reset-zoom-btn").classList.remove("hidden");
+            
+            updateDashboard();
+            nextTarget();
+        }
+
+        function nextTarget() {
+            if (unfoundProvinces.length === 0) {
+                endGame();
+                return;
+            }
+            // Sıradaki ili al
+            currentTarget = unfoundProvinces.pop();
+            
+            // Arayüze yazdır
+            const targetEl = document.getElementById("target-name");
+            targetEl.textContent = getProvinceName(currentTarget);
+            
+            // Küçük bir görsel zıplama efekti
+            targetEl.animate([
+                { transform: 'scale(1.1)' },
+                { transform: 'scale(1)' }
+            ], { duration: 300, easing: 'ease-out' });
+        }
+
+        function endGame() {
+            gameActive = false;
+            currentTarget = null;
+            document.getElementById("target-name").textContent = "-";
+            document.getElementById("reset-zoom-btn").classList.add("hidden");
+            
+            // Sonuç ekranını göster
+            const gameOverOverlay = document.getElementById("game-over-overlay");
+            gameOverOverlay.classList.remove("hidden");
+            
+            document.getElementById("final-score").textContent = score;
+            document.getElementById("final-mistakes").textContent = mistakes;
+        }
+
+        function updateDashboard() {
+            document.getElementById("score-text").textContent = score;
+            document.getElementById("mistake-text").textContent = mistakes;
+        }
+
+        function resetZoom() {
+            svg.transition()
+               .duration(750)
+               .call(zoomBehavior.transform, d3.zoomIdentity);
+        }
+
+        // Oyunu başlatmak için JSON verisini çek
+        initMap();
+
+    </script>
+</body>
+</html>
